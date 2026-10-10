@@ -1,8 +1,8 @@
-// ffi-napi 대체 구현 (Linux).
-// 앱은 ffi를 Windows DLL(XInputUtil, JieLi 업그레이드, SAPJoyUni SDK, user32/kernel32) 호출에만 쓴다.
-// Linux에서는 그 DLL들을 쓸 수 없고, 원본 prebuild는 시스템 libffi.so.8과 심볼이 섞여
-// 콜백 생성 시 SIGSEGV로 죽는다. 그래서 Library는 명확한 오류를 던지고,
-// 모듈 로드 시점에 만들어지는 Callback은 호출되지 않는 더미를 돌려준다.
+// ffi-napi replacement (Linux).
+// The app only uses ffi to call Windows DLLs (XInputUtil, JieLi upgrade, SAPJoyUni SDKs, user32/kernel32).
+// Those DLLs cannot be used on Linux, and the original prebuild mixes symbols with the system
+// libffi.so.8 and crashes with SIGSEGV when creating callbacks. So Library throws a clear error,
+// and Callback (created at module load time) returns a dummy that is never invoked.
 'use strict';
 const ref = require('ref-napi');
 
@@ -29,7 +29,7 @@ function VariadicForeignFunction() {
   throw new FfiUnavailableError('VariadicForeignFunction');
 }
 
-// 네이티브 코드에 넘겨질 일이 없는 NULL 포인터 크기의 버퍼
+// A pointer-sized NULL buffer that is never passed to native code
 function Callback() {
   const buf = Buffer.alloc(ref.sizeof.pointer);
   buf.type = ref.refType(ref.types.void);

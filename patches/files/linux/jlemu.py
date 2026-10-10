@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""JieLi 펌웨어 업그레이드 DLL(jl_firmware_upgrade_x86.dll)을 Linux에서 실행한다.
+"""Runs the JieLi firmware upgrade DLL (jl_firmware_upgrade_x86.dll) on Linux.
 
-공식 GameSir Connect가 쓰는 32비트 Windows DLL을 Unicorn(x86 에뮬레이터)에 올려
-업그레이드 로직은 원본 그대로 실행하고, Windows API 중 장치 입출력만 Linux로 연결한다:
+The 32-bit Windows DLL used by the official GameSir Connect is loaded into Unicorn (an x86
+emulator), so the upgrade logic runs unmodified; only device I/O Windows APIs are routed to Linux:
 
-  CreateFileA("\\\\.\\X:")              -> /dev/sgN 열기
+  CreateFileA("\\\\.\\X:")              -> open /dev/sgN
   DeviceIoControl(SCSI_PASS_THROUGH_DIRECT) -> SG_IO ioctl
-  DeviceIoControl(STORAGE_QUERY_PROPERTY)   -> SCSI INQUIRY로 장치 설명자 생성
+  DeviceIoControl(STORAGE_QUERY_PROPERTY)   -> device descriptor built from SCSI INQUIRY
 
-나머지 API(힙, 이벤트, 스레드, 리소스, CRT 초기화 등)는 최소한으로 흉내 낸다.
-구현하지 않은 API가 호출되면 즉시 실패한다 (추측으로 진행하지 않는다).
+Other APIs (heap, events, threads, resources, CRT init, ...) are minimally emulated.
+Calling an unimplemented API fails immediately (no guessing).
 
-DLL의 작업 스레드는 협조적으로 실행된다: 신호되지 않은 이벤트를 기다리는 스레드는
-CPU 컨텍스트를 저장하고 실행 가능한 다른 스레드로 전환한다.
+The DLL's worker thread runs cooperatively: a thread waiting on an unsignaled event
+saves its CPU context and switches to another runnable thread.
 
-출력: stdout 에 JSON 한 줄씩 ({"event": ...}). 로그는 stderr.
+Output: one JSON object per line on stdout ({"event": ...}). Logs go to stderr.
 """
 import argparse
 import ctypes
@@ -33,22 +33,22 @@ from unicorn.x86_const import (
     UC_X86_REG_GDTR,
 )
 
-# ---------------------------------------------------------------- 메모리 배치
-STUB_BASE = 0x7E000000      # import 스텁 (각 16바이트, int3로 채움)
+# ---------------------------------------------------------------- memory layout
+STUB_BASE = 0x7E000000      # import stubs (16 bytes each, filled with int3)
 STUB_SIZE = 0x10000
 HEAP_BASE = 0x20000000
-HEAP_SIZE = 0x10000000      # 256MB 범프 할당기
+HEAP_SIZE = 0x10000000      # 256 MB bump allocator
 STACK_SIZE = 0x200000
-STACKS_BASE = 0x30000000    # 스레드별 스택
-TEB_BASE = 0x7FFD0000       # 스레드별 TEB (0x1000 간격)
+STACKS_BASE = 0x30000000    # per-thread stacks
+TEB_BASE = 0x7FFD0000       # per-thread TEBs (0x1000 apart)
 PEB_ADDR = 0x7FFDF000
-MISC_BASE = 0x7FF00000      # 환경 문자열, 커맨드라인 등
-MODULE_PATH = 'C:\\gsc\\dfu\\jl_firmware_upgrade_x86.dll'   # DLL이 보는 자기 경로
-GDT_ADDR = 0x7FFE0000       # GDT: 1=flat data(ring3) 2=flat stack(ring0) 3+n=스레드 n의 FS(TEB)
+MISC_BASE = 0x7FF00000      # environment strings, command line, etc.
+MODULE_PATH = 'C:\\gsc\\dfu\\jl_firmware_upgrade_x86.dll'   # the DLL's own path as it sees it
+GDT_ADDR = 0x7FFE0000       # GDT: 1=flat data(ring3) 2=flat stack(ring0) 3+n=FS (TEB) of thread n
 
-RET_SENTINEL = STUB_BASE + STUB_SIZE - 0x10       # 최상위 호출의 복귀 주소
-THREAD_EXIT = STUB_BASE + STUB_SIZE - 0x20        # 작업 스레드 함수의 복귀 주소
-PROGRESS_CB = STUB_BASE + STUB_SIZE - 0x30        # 진행률 콜백 (cdecl, int)
+RET_SENTINEL = STUB_BASE + STUB_SIZE - 0x10       # return address of top-level calls
+THREAD_EXIT = STUB_BASE + STUB_SIZE - 0x20        # return address of worker thread functions
+PROGRESS_CB = STUB_BASE + STUB_SIZE - 0x30        # progress callback (cdecl, int)
 
 INVALID_HANDLE = 0xFFFFFFFF
 WAIT_OBJECT_0 = 0
@@ -104,7 +104,7 @@ class SgIoHdr(ctypes.Structure):
 
 
 class ScsiDevice:
-    """/dev/sgN 에 SCSI 명령을 보낸다. readonly 이면 DATA_OUT 명령은 보내지 않고 실패시킨다."""
+    """Sends SCSI commands to /dev/sgN. In readonly mode, DATA_OUT commands are failed without being sent."""
 
     def __init__(self, path, readonly, trace):
         self.path = path
@@ -125,7 +125,7 @@ class ScsiDevice:
                 f' cdb={cdb.hex()} len={data_len}' + (f' data={data_out[:32].hex()}' if data_out else ''))
         if self.readonly and direction == SG_DXFER_TO_DEV:
             self.blocked += 1
-            log(f'  -> readonly 모드: DATA_OUT 명령 차단 (cdb={cdb.hex()})')
+            log(f'  -> readonly mode: DATA_OUT command blocked (cdb={cdb.hex()})')
             return False, 0, b'', b'', 0
         cmd = (ctypes.c_ubyte * len(cdb)).from_buffer_copy(cdb)
         sense = (ctypes.c_ubyte * 32)()
@@ -145,31 +145,31 @@ class ScsiDevice:
         try:
             fcntl.ioctl(self.fd, SG_IO, hdr)
         except OSError as e:
-            log(f'  -> SG_IO 실패: {e}')
+            log(f'  -> SG_IO failed: {e}')
             return False, 0, b'', b'', 0
         got = data_len - max(hdr.resid, 0)
         data_in = bytes(buf)[:data_len] if direction == SG_DXFER_FROM_DEV else b''
         if self.trace:
             log(f'  -> status={hdr.status} host={hdr.host_status} driver={hdr.driver_status} resid={hdr.resid}'
                 + (f' in={data_in[:32].hex()}' if data_in else ''))
-        if hdr.host_status or (hdr.driver_status & 0xF) not in (0, 8):  # DRIVER_SENSE(8)은 정상 경로
+        if hdr.host_status or (hdr.driver_status & 0xF) not in (0, 8):  # DRIVER_SENSE (8) is a normal path
             return False, hdr.status, data_in, bytes(sense)[:hdr.sb_len_wr], got
         return True, hdr.status, data_in, bytes(sense)[:hdr.sb_len_wr], got
 
     def inquiry(self):
         ok, st, data, _, _ = self.command(bytes([0x12, 0, 0, 0, 36, 0]), SG_DXFER_FROM_DEV, 36)
         if not ok or st != 0 or len(data) < 36:
-            raise EmuError('INQUIRY 실패')
+            raise EmuError('INQUIRY failed')
         return data[8:16], data[16:32], data[32:36]
 
 
-# ---------------------------------------------------------------- 에뮬레이터
+# ---------------------------------------------------------------- emulator
 class Thread:
     def __init__(self, tid, teb):
         self.tid = tid
         self.teb = teb
         self.ctx = None
-        self.waiting = None      # 기다리는 핸들
+        self.waiting = None      # handle being waited on
         self.done = False
         self.last_error = 0
         self.tls = {}
@@ -195,7 +195,7 @@ class Emulator:
         self.progress_cb = None
         self._load()
 
-    # ---- 기본 메모리 도구
+    # ---- basic memory helpers
     def r32(self, a):
         return struct.unpack('<I', self.uc.mem_read(a, 4))[0]
 
@@ -234,7 +234,7 @@ class Emulator:
         size = max(int(size), 1)
         addr = (self.heap_next + 15) & ~15
         if addr + size > HEAP_BASE + HEAP_SIZE:
-            raise EmuError('에뮬레이터 힙 부족')
+            raise EmuError('emulator heap exhausted')
         self.heap_next = addr + size
         self.heap_sizes[addr] = size
         if zero:
@@ -247,7 +247,7 @@ class Emulator:
         self.handles[h] = obj
         return h
 
-    # ---- PE 로드
+    # ---- PE loading
     def _load(self):
         pe = self.pe
         self.base = pe.OPTIONAL_HEADER.ImageBase
@@ -269,7 +269,7 @@ class Emulator:
         for r in (UC_X86_REG_DS, UC_X86_REG_ES, UC_X86_REG_GS):
             uc.reg_write(r, (1 << 3) | 3)
 
-        # import 해석
+        # resolve imports
         apis = api_table()
         slot = 0
         for entry in pe.DIRECTORY_ENTRY_IMPORT:
@@ -284,7 +284,7 @@ class Emulator:
         self.stubs[THREAD_EXIT] = ('<thread-exit>', 0, None)
         self.stubs[PROGRESS_CB] = ('<progress>', 0, None)
 
-        # 공용 문자열
+        # shared strings
         self.cmdline_a = MISC_BASE
         self.uc.mem_write(self.cmdline_a, b'gscupgrade.exe\0')
         self.cmdline_w = MISC_BASE + 0x100
@@ -295,17 +295,17 @@ class Emulator:
         uc.hook_add(UC_HOOK_CODE, self._on_stub, begin=STUB_BASE, end=STUB_BASE + STUB_SIZE - 1)
         uc.hook_add(UC_HOOK_MEM_INVALID, self._on_bad_mem)
 
-        # 메인 스레드
+        # main thread
         main = self._new_thread()
         self.cur = main
         uc.reg_write(UC_X86_REG_FS, main.fs_sel)
         self.main = main
 
-        # export 표
+        # export table
         self.exports = {e.name.decode(): self.base + e.address
                         for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name}
 
-        # 리소스 표: (type, name) -> (rva, size)
+        # resource table: (type, name) -> (rva, size)
         self.resources = {}
         rsrc = pe.DIRECTORY_ENTRY_RESOURCE.entries if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE') else []
         for t in rsrc:
@@ -316,7 +316,7 @@ class Emulator:
                     self.resources[(tkey, nkey)] = (lang.data.struct.OffsetToData, lang.data.struct.Size)
 
     def _gdt_set(self, idx, base, limit, access):
-        flags = 0xC  # 4KB 단위, 32비트
+        flags = 0xC  # 4 KB granularity, 32-bit
         d = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (access << 40) \
             | (((limit >> 16) & 0xF) << 48) | (flags << 52) | (((base >> 24) & 0xFF) << 56)
         self.uc.mem_write(GDT_ADDR + idx * 8, struct.pack('<Q', d))
@@ -324,7 +324,7 @@ class Emulator:
     def _new_thread(self):
         idx = len(self.threads)
         if idx >= 4:
-            raise EmuError('스레드가 너무 많음')
+            raise EmuError('too many threads')
         teb = TEB_BASE + idx * 0x1000
         stack_top = STACKS_BASE + (idx + 1) * STACK_SIZE - 0x100
         self.w32(teb + 0x00, 0xFFFFFFFF)                  # ExceptionList
@@ -341,11 +341,11 @@ class Emulator:
         self.threads.append(th)
         return th
 
-    # ---- 실행
+    # ---- execution
     def call(self, addr, *args, timeout_s=600):
-        """cdecl 함수 호출 (메인 스레드). 인자는 int."""
+        """Calls a cdecl function on the main thread. Arguments are ints."""
         if self.cur is not self.main:
-            raise EmuError('메인 스레드가 아님')
+            raise EmuError('not on the main thread')
         uc = self.uc
         esp = self.main.stack_top
         for a in reversed(args):
@@ -360,31 +360,31 @@ class Emulator:
             uc.emu_start(addr, RET_SENTINEL, timeout=int(timeout_s * 1e6))
         except UcError as e:
             eip = uc.reg_read(UC_X86_REG_EIP)
-            raise EmuError(f'에뮬레이션 오류 {e} @ {eip:#x} (thread {self.cur.tid:#x})') from None
+            raise EmuError(f'emulation error {e} @ {eip:#x} (thread {self.cur.tid:#x})') from None
         if self._fault:
             raise EmuError(self._fault)
         if uc.reg_read(UC_X86_REG_EIP) != RET_SENTINEL or self.cur is not self.main:
-            raise EmuError(f'함수가 정상 복귀하지 않음 (eip={uc.reg_read(UC_X86_REG_EIP):#x}, 시간 초과?)')
+            raise EmuError(f'function did not return normally (eip={uc.reg_read(UC_X86_REG_EIP):#x}, timeout?)')
         return uc.reg_read(UC_X86_REG_EAX)
 
     def export(self, name, *args, **kw):
         if name not in self.exports:
-            raise EmuError(f'export 없음: {name}')
+            raise EmuError(f'export not found: {name}')
         return self.call(self.exports[name], *args, **kw)
 
     def run_dllmain(self):
         entry = self.base + self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
         ret = self.call_stdcall(entry, self.base, 1, 0)
         if ret == 0:
-            raise EmuError('DllMain(PROCESS_ATTACH) 실패')
+            raise EmuError('DllMain(PROCESS_ATTACH) failed')
 
     def call_stdcall(self, addr, *args):
-        # stdcall은 피호출자가 스택을 정리하지만 복귀 후 ESP를 다시 맞추므로 cdecl과 동일하게 호출 가능
+        # stdcall callees clean the stack, but ESP is reset after return, so this works like cdecl
         return self.call(addr, *args)
 
     def _on_bad_mem(self, uc, access, addr, size, value, _):
         eip = uc.reg_read(UC_X86_REG_EIP)
-        self._fault = f'잘못된 메모리 접근 addr={addr:#x} size={size} eip={eip:#x}'
+        self._fault = f'invalid memory access addr={addr:#x} size={size} eip={eip:#x}'
         log(self._fault)
         return False
 
@@ -393,7 +393,7 @@ class Emulator:
             return
         name, nargs, fn = self.stubs[addr]
         if name == '<return>':
-            return  # emu_start until 주소
+            return  # emu_start "until" address
         esp = uc.reg_read(UC_X86_REG_ESP)
         ret_addr = self.r32(esp)
         if name == '<thread-exit>':
@@ -405,11 +405,11 @@ class Emulator:
             emit(event='progress', progress=p if p < 0x80000000 else p - 0x100000000)
             if self.progress_cb:
                 self.progress_cb(p)
-            uc.reg_write(UC_X86_REG_ESP, esp + 4)     # cdecl: 호출자가 인자 정리
+            uc.reg_write(UC_X86_REG_ESP, esp + 4)     # cdecl: the caller cleans up arguments
             uc.reg_write(UC_X86_REG_EIP, ret_addr)
             return
         if fn is None:
-            self._fault = f'구현되지 않은 API: {name}'
+            self._fault = f'unimplemented API: {name}'
             log(self._fault)
             uc.emu_stop()
             return
@@ -417,7 +417,7 @@ class Emulator:
         try:
             result = fn(self, *args)
         except _Block as b:
-            # 현재 스레드는 대기: API가 반환된 상태로 컨텍스트를 만들어 두고 전환
+            # The current thread blocks: save its context as if the API had returned, then switch
             uc.reg_write(UC_X86_REG_ESP, esp + 4 + 4 * nargs)
             uc.reg_write(UC_X86_REG_EIP, ret_addr)
             uc.reg_write(UC_X86_REG_EAX, WAIT_OBJECT_0)
@@ -444,7 +444,7 @@ class Emulator:
         return ev is not None and ev['signaled']
 
     def _switch(self, blocked):
-        """현재 스레드를 멈추고 실행 가능한 다른 스레드로 넘어간다."""
+        """Suspends the current thread and resumes another runnable thread."""
         uc = self.uc
         cur = self.cur
         if not cur.done:
@@ -459,9 +459,9 @@ class Emulator:
                     th.waiting = None
                 self.cur = th
                 uc.context_restore(th.ctx)
-                uc.reg_write(UC_X86_REG_EIP, uc.reg_read(UC_X86_REG_EIP))  # PC 변경을 확정
+                uc.reg_write(UC_X86_REG_EIP, uc.reg_read(UC_X86_REG_EIP))  # make the PC change take effect
                 return
-        self._fault = '교착 상태: 실행 가능한 스레드가 없음'
+        self._fault = 'deadlock: no runnable thread'
         log(self._fault)
         uc.emu_stop()
 
@@ -472,7 +472,7 @@ class Emulator:
         self.w32(esp, param)
         esp -= 4
         self.w32(esp, THREAD_EXIT)
-        # 현재 컨텍스트를 바탕으로 새 스레드 컨텍스트를 만든다
+        # build the new thread's context from the current one
         uc = self.uc
         saved = uc.context_save()
         uc.reg_write(UC_X86_REG_ESP, esp)
@@ -483,7 +483,7 @@ class Emulator:
         uc.context_restore(saved)
         return th
 
-    # ---- 고수준 래퍼 (app의 udiskUpgradWoker.js 와 동일한 호출 순서)
+    # ---- high-level helpers (same call order as the app's udiskUpgradWoker.js)
     def buf(self, data_or_size):
         if isinstance(data_or_size, int):
             return self.alloc(data_or_size)
@@ -497,7 +497,7 @@ class _Block(Exception):
         self.handle = handle
 
 
-# ---------------------------------------------------------------- API 구현
+# ---------------------------------------------------------------- API implementations
 def api_table():
     T = {}
 
@@ -507,7 +507,7 @@ def api_table():
             return fn
         return deco
 
-    # -- 오류/스레드 정보
+    # -- errors / thread info
     @api(0)
     def GetLastError(e):
         return e.cur.last_error
@@ -561,7 +561,7 @@ def api_table():
     def Sleep(e, ms):
         time.sleep(min(ms, 10000) / 1000)
 
-    # -- 포인터 인코딩
+    # -- pointer encoding
     @api(1)
     def EncodePointer(e, p):
         return p
@@ -570,22 +570,22 @@ def api_table():
     def DecodePointer(e, p):
         return p
 
-    # -- 예외 처리 (정상 경로에서는 쓰이지 않아야 함)
+    # -- exception handling (should not be used on the normal path)
     @api(1)
     def SetUnhandledExceptionFilter(e, p):
         return 0
 
     @api(1)
     def UnhandledExceptionFilter(e, p):
-        raise EmuError('처리되지 않은 예외')
+        raise EmuError('unhandled exception')
 
     @api(4)
     def RaiseException(e, code, flags, nargs, args):
-        raise EmuError(f'RaiseException code={code:#x} (C++ 예외 등) — 정상 경로가 아님')
+        raise EmuError(f'RaiseException code={code:#x} (C++ exception?) — not a normal path')
 
     @api(4)
     def RtlUnwind(e, *a):
-        raise EmuError('RtlUnwind 호출 — 정상 경로가 아님')
+        raise EmuError('RtlUnwind called — not a normal path')
 
     @api(2)
     def TerminateProcess(e, h, code):
@@ -595,7 +595,7 @@ def api_table():
     def ExitProcess(e, code):
         raise EmuError(f'ExitProcess({code})')
 
-    # -- 모듈
+    # -- modules
     @api(1)
     def GetModuleHandleW(e, name):
         n = e.wstr(name)
@@ -611,7 +611,7 @@ def api_table():
 
     @api(2)
     def GetProcAddress(e, mod, name):
-        return 0   # CRT는 없을 때의 대체 경로를 쓴다
+        return 0   # the CRT falls back when a function is missing
 
     @api(3)
     def LoadLibraryExW(e, name, h, flags):
@@ -637,14 +637,14 @@ def api_table():
     def GetModuleFileNameW(e, h, buf, size):
         return _modname(e, buf, size, True)
 
-    # -- 리소스 (칩별 LOADER)
+    # -- resources (per-chip LOADERs)
     @api(3)
     def FindResourceA(e, mod, name, typ):
         def key(v):
             return v if v < 0x10000 else e.cstr(v)
         k = (key(typ), key(name))
         if k not in e.resources:
-            log(f'FindResourceA: 없음 {k}')
+            log(f'FindResourceA: not found {k}')
             return 0
         return e.new_handle(('res',) + e.resources[k])
 
@@ -666,7 +666,7 @@ def api_table():
     def GlobalUnlock(e, h):
         return 0
 
-    # -- 힙
+    # -- heap
     @api(0)
     def GetProcessHeap(e):
         return 0x00500000
@@ -712,7 +712,7 @@ def api_table():
         e.cur.tls[i] = v
         return 1
 
-    # -- 동기화
+    # -- synchronization
     @api(2)
     def InitializeCriticalSectionAndSpinCount(e, cs, spin):
         return 1
@@ -754,7 +754,7 @@ def api_table():
 
     @api(3)
     def CreateMutexW(e, sa, owner, name):
-        return _event(e, False, True)   # 협조적 스케줄링이므로 항상 획득 가능
+        return _event(e, False, True)   # always acquirable under cooperative scheduling
 
     @api(1)
     def ReleaseMutex(e, h):
@@ -767,7 +767,7 @@ def api_table():
     def SetEvent(e, h):
         ev = e.events.get(h)
         if ev is None:
-            raise EmuError(f'SetEvent: 알 수 없는 핸들 {h:#x}')
+            raise EmuError(f'SetEvent: unknown handle {h:#x}')
         ev['signaled'] = True
         return 1
 
@@ -775,7 +775,7 @@ def api_table():
     def ResetEvent(e, h):
         ev = e.events.get(h)
         if ev is None:
-            raise EmuError(f'ResetEvent: 알 수 없는 핸들 {h:#x}')
+            raise EmuError(f'ResetEvent: unknown handle {h:#x}')
         ev['signaled'] = False
         return 1
 
@@ -789,7 +789,7 @@ def api_table():
                     return WAIT_OBJECT_0
                 if timeout == 0:
                     return WAIT_TIMEOUT
-            raise EmuError(f'WaitForSingleObject: 지원하지 않는 핸들 {h:#x}')
+            raise EmuError(f'WaitForSingleObject: unsupported handle {h:#x}')
         if ev['signaled']:
             if not ev['manual']:
                 ev['signaled'] = False
@@ -820,14 +820,14 @@ def api_table():
             obj[1].done = True
         return 1
 
-    # -- 파일/장치
+    # -- files / devices
     def _open(e, path, access):
         log(f'CreateFile({path!r})')
         p = path.replace('/', '\\')
         if p.upper().rstrip('\\').endswith(f'{e.letter}:') and e.device is not None:
             return e.new_handle(('device',))
         if p.lower() == MODULE_PATH.lower():
-            # DLL 자기 무결성 검사용: 원본 파일을 읽기 전용으로 연결
+            # for the DLL's self integrity check: map to the original file, read-only
             if access & 0x40000000:   # GENERIC_WRITE
                 e.cur.last_error = 5
                 return INVALID_HANDLE
@@ -861,14 +861,14 @@ def api_table():
             return _sptd(e, inb, insz, outb, outsz, ret)
         if code == IOCTL_STORAGE_QUERY_PROPERTY:
             return _query_property(e, inb, insz, outb, outsz, ret)
-        raise EmuError(f'DeviceIoControl: 지원하지 않는 코드 {code:#x}')
+        raise EmuError(f'DeviceIoControl: unsupported code {code:#x}')
 
     def _sptd(e, inb, insz, outb, outsz, ret):
         s = e.rbytes(inb, 0x2C)
         cdb_len, sense_len, data_in = s[6], s[7], s[8]
         xfer_len, timeout_s, data_ptr, sense_off = struct.unpack_from('<IIII', s, 12)
         if not 1 <= cdb_len <= 16:
-            raise EmuError(f'SPTD: 비정상 CdbLength {cdb_len}')
+            raise EmuError(f'SPTD: invalid CdbLength {cdb_len}')
         cdb = s[28:28 + cdb_len]
         if data_in == 1:
             direction = SG_DXFER_FROM_DEV
@@ -877,7 +877,7 @@ def api_table():
         else:
             direction = SG_DXFER_NONE if xfer_len == 0 else None
         if direction is None:
-            raise EmuError(f'SPTD: DataIn={data_in} 미지원')
+            raise EmuError(f'SPTD: DataIn={data_in} not supported')
         out = e.rbytes(data_ptr, xfer_len) if direction == SG_DXFER_TO_DEV else b''
         ok, status, din, sense, got = e.device.command(cdb, direction, xfer_len, out, timeout_s * 1000)
         if not ok:
@@ -903,7 +903,7 @@ def api_table():
     def _query_property(e, inb, insz, outb, outsz, ret):
         prop_id, query_type = struct.unpack('<II', e.rbytes(inb, 8))
         if prop_id != 0 or query_type != 0:
-            raise EmuError(f'STORAGE_QUERY_PROPERTY: 미지원 ({prop_id},{query_type})')
+            raise EmuError(f'STORAGE_QUERY_PROPERTY: not supported ({prop_id},{query_type})')
         vendor, product, rev = e.device.inquiry()
         strings = b''
         offs = []
@@ -997,7 +997,7 @@ def api_table():
     def SetEndOfFile(e, h):
         return 0
 
-    # -- 환경/로캘 (CRT 초기화용)
+    # -- environment / locale (for CRT init)
     @api(0)
     def GetCommandLineA(e):
         return e.cmdline_a
@@ -1092,7 +1092,7 @@ def api_table():
         e.uc.mem_write(dst, text[:dn].encode('utf-16le'))
         return min(len(text), dn)
 
-    # -- 난수 (CRT 쿠키 등)
+    # -- randomness (CRT cookie, etc.)
     @api(2, 'SystemFunction036')
     def RtlGenRandom(e, p, n):
         e.uc.mem_write(p, os.urandom(n))
@@ -1115,7 +1115,7 @@ def api_table():
     return T
 
 
-# ---------------------------------------------------------------- 명령
+# ---------------------------------------------------------------- commands
 def load_ufw(emu, path):
     data = open(path, 'rb').read()
     p = emu.buf(data)
@@ -1162,24 +1162,24 @@ def s32(v):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dll', required=True)
-    ap.add_argument('--device', help='/dev/sgN (JieLi UBOOT 장치)')
-    ap.add_argument('--trace', action='store_true', help='SCSI 명령 로그')
+    ap.add_argument('--device', help='/dev/sgN (JieLi UBOOT device)')
+    ap.add_argument('--trace', action='store_true', help='log SCSI commands')
     sub = ap.add_subparsers(dest='cmd', required=True)
-    s = sub.add_parser('ufwinfo', help='UFW 파일 정보 (장치 불필요)')
+    s = sub.add_parser('ufwinfo', help='UFW file info (no device needed)')
     s.add_argument('ufw')
-    s = sub.add_parser('query', help='장치 식별 (읽기 전용)')
-    s.add_argument('--ufw', help='먼저 불러올 UFW (칩 KEY 확인용, 앱의 공통 UFW)')
-    s = sub.add_parser('upgrade', help='펌웨어 업그레이드 (장치에 씀!)')
+    s = sub.add_parser('query', help='identify the device (read-only)')
+    s.add_argument('--ufw', help='UFW to load first (for chip KEY matching; the app uses a common UFW)')
+    s = sub.add_parser('upgrade', help='firmware upgrade (writes to the device!)')
     s.add_argument('ufw')
     s.add_argument('--no-pid-check', action='store_true')
     s.add_argument('--dual-backup', action='store_true')
-    s.add_argument('--readonly', action='store_true', help='DATA_OUT 명령을 보내지 않는 리허설')
+    s.add_argument('--readonly', action='store_true', help='rehearsal that never sends DATA_OUT commands')
     a = ap.parse_args()
 
     dev = None
     if a.cmd in ('query', 'upgrade'):
         if not a.device:
-            ap.error('--device 필요')
+            ap.error('--device is required')
         readonly = a.cmd == 'query' or a.readonly
         dev = ScsiDevice(a.device, readonly=readonly, trace=a.trace)
 

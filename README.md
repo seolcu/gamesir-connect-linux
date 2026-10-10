@@ -1,58 +1,64 @@
-# GameSir Connect for Linux (로컬 리패키저)
+# GameSir Connect for Linux (local repackager)
 
-GameSir 공식 설정 앱 **GameSir Connect**(Windows 전용)를 Linux에서 원본 그대로 실행하기 위한 변환 스크립트입니다.
-Cyclone 2 (`3537:100b` 등)를 기준으로 작업했습니다.
+Scripts to run GameSir's official configuration app, **GameSir Connect** (Windows-only), unmodified on Linux.
+Developed and tested with a Cyclone 2 (`3537:100b` and related IDs).
 
-> 이 저장소에는 GameSir의 코드가 들어 있지 않습니다. `build.sh`가 공식 서버에서 설치 파일을 받아
-> **사용자의 PC에서만** 변환합니다. GameSir와 무관한 비공식 프로젝트입니다.
+> This repository contains no GameSir code. `build.sh` downloads the installer from GameSir's
+> official server and converts it **on your machine only**. This is an unofficial project, not affiliated with GameSir.
 
-## 설치
+## Install
 
 ```bash
-./build.sh            # ~/.local/share/gamesir-connect 에 설치, 런처 등록
+./build.sh            # installs to ~/.local/share/gamesir-connect and registers a launcher
 sudo install -m644 70-gamesir.rules /etc/udev/rules.d/ \
-  && sudo udevadm control --reload-rules && sudo udevadm trigger   # 최초 1회
+  && sudo udevadm control --reload-rules && sudo udevadm trigger   # once
 gamesir-connect
 ```
 
-필요한 것: `curl 7z unzip node npm openssl python3` (uv가 있으면 사용).
-새 버전이 나오면 `./build.sh`를 다시 실행하세요. 앱 자체의 자동 업데이트는 꺼져 있습니다.
+Requirements: `curl 7z unzip node npm openssl python3` (uv is used if available).
+When a new version comes out, run `./build.sh` again. The app's built-in auto-update is disabled.
 
-## 동작 방식
+## How it works
 
-| 단계 | 내용 |
+| Step | Details |
 |---|---|
-| 다운로드 | `pc-connect-update.gamesir-cdn.com/latest.yml`의 sha512로 설치 파일 검증 |
-| 런타임 | 원본과 같은 Electron 13.6.9 (linux-x64, sha256 검증) |
-| node-hid | 공식 N-API prebuild(hidraw 백엔드)로 교체 |
-| usb-detection | prebuild가 Electron 13.6.9와 심볼 불일치 → `/sys/bus/usb` 폴링 JS 구현 (`patches/overrides/usb-detection`) |
-| iconv | Windows 바이너리뿐 → iconv-lite 기반 구현 |
-| ffi-napi | Windows DLL 호출 전용 + 시스템 libffi와 충돌로 SIGSEGV → 스텁 (Library는 오류) |
-| JS 패치 | `patches/patches.js` — 문자열 정확 일치 치환, 원본이 바뀌면 빌드 실패 |
-| 펌웨어 | 공식 JieLi DLL을 Unicorn으로 에뮬레이션 (`patches/files/linux/jlemu.py`) |
+| Download | Installer verified against the sha512 in `pc-connect-update.gamesir-cdn.com/latest.yml` |
+| Runtime | Same Electron as the original, 13.6.9 (linux-x64, sha256 verified) |
+| node-hid | Replaced with the official N-API prebuild (hidraw backend) |
+| usb-detection | Prebuild has symbol mismatches with Electron 13.6.9 → JS implementation polling `/sys/bus/usb` (`patches/overrides/usb-detection`) |
+| iconv | Windows binary only → iconv-lite based implementation |
+| ffi-napi | Only used for Windows DLLs, and crashes (SIGSEGV) against system libffi → stub (`Library` throws) |
+| JS patches | `patches/patches.js` — exact string replacements; the build fails if the original changes |
+| Fonts | Windows font names mapped to the app's bundled Source Han Sans for CJK text |
+| Firmware | The official JieLi DLL is emulated with Unicorn (`patches/files/linux/jlemu.py`) |
 
-### 펌웨어 업데이트 (`jlemu.py`)
+### Firmware updates (`jlemu.py`)
 
-Cyclone 2/동글은 JieLi 칩입니다. 앱은 컨트롤러를 UBOOT(USB 저장장치) 모드로 재부팅한 뒤,
-`jl_firmware_upgrade_x86.dll`이 SCSI 명령으로 `.ufw`를 씁니다.
-Linux에서는 **같은 DLL을 x86 에뮬레이터에서 그대로 실행**하고, 장치 입출력만 `SG_IO`로 연결합니다.
-업그레이드 로직(로더, KEY, CRC, 블록 쓰기)은 원본과 동일합니다.
+The Cyclone 2 and its dongle use JieLi chips. The app reboots the controller into UBOOT (USB mass storage) mode,
+and `jl_firmware_upgrade_x86.dll` writes the `.ufw` file with SCSI commands.
+On Linux, **the same DLL runs unmodified in an x86 emulator**, and only device I/O is routed to `SG_IO`.
+The upgrade logic (loader, KEY, CRC, block writes) is identical to the original.
 
 ```bash
 PY=~/.local/share/gamesir-connect/resources/pyenv/bin/python
 DFU=~/.local/share/gamesir-connect/resources/dfu
 $PY -I $DFU/linux/jlemu.py --dll $DFU/jl_firmware_upgrade_x86.dll ufwinfo $DFU/packages/GS_C2_DEVICE_V123_Key.ufw
-$PY -I $DFU/linux/jlemu.py --dll $DFU/jl_firmware_upgrade_x86.dll --device /dev/sgN --trace query            # 읽기 전용
-$PY -I $DFU/linux/jlemu.py --dll $DFU/jl_firmware_upgrade_x86.dll --device /dev/sgN --trace upgrade --readonly X.ufw  # 쓰기 차단 리허설
+$PY -I $DFU/linux/jlemu.py --dll $DFU/jl_firmware_upgrade_x86.dll --device /dev/sgN --trace query            # read-only
+$PY -I $DFU/linux/jlemu.py --dll $DFU/jl_firmware_upgrade_x86.dll --device /dev/sgN --trace upgrade --readonly X.ufw  # rehearsal with writes blocked
 ```
 
-⚠ 원본 앱과 마찬가지로, **UBOOT 모드 장치가 연결되면 앱이 자동으로 맞는 펌웨어를 씁니다.**
+⚠ Like the original app, **when a UBOOT-mode device is connected, the app automatically writes the matching firmware.**
+The real write path has not been tested on hardware yet (the test device was already up to date).
 
-## 문서
-- `docs/PROTOCOL.md` — 앱 구조, Cyclone 2 HID 설정 프로토콜
-- `docs/FIRMWARE.md` — 펌웨어 업데이트 흐름과 DLL 분석
+## Status
+Tested on Fedora 44 with a Cyclone 2 over the wireless dongle: device detection, reading all settings,
+and writing a setting (then reverting it, verified byte-identical) all work.
 
-## 라이선스
-이 저장소의 스크립트와 패치는 MIT 라이선스입니다 (`LICENSE`).
-GameSir Connect 본체, DLL, 펌웨어는 GameSir의 저작물이며 이 저장소에 포함되지 않습니다.
-펌웨어 업데이트는 기기를 망가뜨릴 수 있으니 본인 책임으로 사용하세요.
+## Docs
+- `docs/PROTOCOL.md` — app structure and the Cyclone 2 HID config protocol
+- `docs/FIRMWARE.md` — firmware update flow and DLL analysis
+
+## License
+The scripts and patches in this repository are MIT licensed (`LICENSE`).
+GameSir Connect itself, its DLLs and firmware are GameSir's work and are not included in this repository.
+Firmware updates can brick your device; use them at your own risk.

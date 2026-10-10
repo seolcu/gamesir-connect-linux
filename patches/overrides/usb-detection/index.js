@@ -1,6 +1,6 @@
-// usb-detection 대체 구현 (Linux, 네이티브 코드 없음).
-// /sys/bus/usb/devices 를 주기적으로 읽어 원본 모듈과 같은 이벤트/객체 형태로 알린다.
-// 원본 prebuild는 Electron 13.6.9의 V8 심볼과 맞지 않아 로드 시 프로세스가 죽는다.
+// usb-detection replacement (Linux, no native code).
+// Polls /sys/bus/usb/devices and reports changes with the same events/objects as the original module.
+// The original prebuild does not match Electron 13.6.9's V8 symbols and kills the process on load.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -26,7 +26,7 @@ function scan() {
     return found;
   }
   for (const name of entries) {
-    if (name.includes(':')) continue; // 인터페이스 노드는 건너뛴다
+    if (name.includes(':')) continue; // skip interface nodes
     const dir = path.join(SYSFS, name);
     const vid = readAttr(dir, 'idVendor');
     if (!vid) continue;
@@ -40,7 +40,7 @@ function scan() {
       manufacturer: readAttr(dir, 'manufacturer'),
       serialNumber: readAttr(dir, 'serial'),
       deviceAddress: devnum,
-      // 같은 포트에 재열거되면 devnum이 바뀌므로 키에 포함
+      // devnum changes when re-enumerated on the same port, so include it in the key
       _key: `${name}#${devnum}`,
     });
   }
@@ -50,8 +50,8 @@ function scan() {
 const detector = new EventEmitter();
 detector.setMaxListeners(0);
 
-let known = new Map(); // _key -> device (보고된 장치)
-let pending = new Map(); // _key -> device (한 번만 본 장치, 드라이버 바인딩 대기)
+let known = new Map(); // _key -> device (reported devices)
+let pending = new Map(); // _key -> device (seen once, waiting for drivers to bind)
 let timer = null;
 
 function emitAll(kind, device) {
@@ -79,7 +79,7 @@ function poll() {
   const nextPending = new Map();
   for (const [k, d] of now) {
     if (known.has(k)) continue;
-    // 두 번 연속 보였을 때 알린다: hidraw 등 하위 드라이버가 붙을 시간을 준다
+    // Report after two consecutive sightings: gives hidraw and other drivers time to bind
     if (pending.has(k)) {
       known.set(k, d);
       emitAll('add', d);
@@ -113,7 +113,7 @@ detector.find = function (...args) {
 
 detector.startMonitoring = function () {
   if (timer) return;
-  // 이미 연결된 장치는 add 이벤트 없이 기준선으로 둔다 (원본 동작과 동일)
+  // Devices already connected become the baseline without add events (same as the original)
   known = new Map();
   for (const d of scan().values()) known.set(d._key, d);
   pending = new Map();

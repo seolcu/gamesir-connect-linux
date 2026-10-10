@@ -1,6 +1,6 @@
-# GameSir 컨트롤러/동글 — 로그인한 사용자에게 hidraw 접근 허용 (설정 프로토콜)
+# GameSir controllers/dongles — give the logged-in user hidraw access (config protocol)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3537", TAG+="uaccess"
 
-# JieLi UBOOT 펌웨어 업데이트 모드 (VID 0x4C4A) — SCSI generic / 블록 장치 접근 허용
+# JieLi UBOOT firmware update mode (VID 0x4C4A) — allow SCSI generic / block device access
 SUBSYSTEM=="scsi_generic", ATTRS{idVendor}=="4c4a", TAG+="uaccess"
 SUBSYSTEM=="block", ATTRS{idVendor}=="4c4a", TAG+="uaccess", ENV{UDISKS_IGNORE}="1"

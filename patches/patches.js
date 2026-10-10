@@ -1,10 +1,12 @@
-// Linux 포팅 패치 목록. 경로는 resources/ 기준.
-// replace: [찾을 문자열, 바꿀 문자열, 기대 횟수(기본 1)]
-// 원본이 바뀌어 기대 횟수와 다르면 빌드가 실패한다 (조용히 잘못 패치되는 것을 막기 위함).
+// Linux port patch list. Paths are relative to resources/.
+// replace: [search string, replacement, expected count (default 1)]
+// If the original changes and the count differs, the build fails
+// (prevents silently applying a wrong patch).
 'use strict';
 
-// Windows 시스템 글꼴 이름을 앱 내장 Source Han Sans로 연결한다 (CJK 범위만).
-// Linux에서는 이 이름들이 시스템 Noto Sans CJK 가변 폰트로 대체되는데, Chrome 91이 이를 □로 그린다.
+// Map Windows system font names to the app's bundled Source Han Sans (CJK ranges only).
+// On Linux these names fall back to the system Noto Sans CJK variable font,
+// which Chrome 91 renders as tofu boxes.
 const CJK_FONT_ALIASES = (() => {
   const families = ['Segoe UI', 'Microsoft YaHei', 'Malgun Gothic', 'Yu Gothic UI'];
   const ranges = [
@@ -21,26 +23,26 @@ const CJK_FONT_ALIASES = (() => {
   return `<style id="gs-linux-fonts">${rules.join('')}</style>`;
 })();
 
-// main.js 번들 앞에 붙는 Linux 헬퍼 로더. __dirname = resources/app/dist/electron
+// Linux helper loader prepended to the main.js bundle. __dirname = resources/app/dist/electron
 const LINUX_HELPER = `globalThis.__gsLinux=process.platform==="linux"?require(require("path").join(__dirname,"../../../dfu/linux/index.js")):null;`;
 
 module.exports = [
   {
-    name: 'index.html: CJK 글꼴 별칭',
+    name: 'index.html: CJK font aliases',
     file: 'app/dist/electron/index.html',
     marker: 'gs-linux:fonts',
     html: true,
     replace: [['</head>', `${CJK_FONT_ALIASES}</head>`]],
   },
   {
-    name: 'main: Linux 헬퍼 로드',
+    name: 'main: load Linux helper',
     file: 'app/dist/electron/main.js',
     marker: 'gs-linux:helper',
     prepend: LINUX_HELPER,
   },
   {
-    name: 'main: 서비스 초기화 개별 보호',
-    // 다른 기종 SDK(Windows DLL) init이 실패하면 하트비트가 시작되지 않던 문제
+    name: 'main: guard each service init',
+    // Failing init of other models' SDKs (Windows DLLs) prevented the heartbeat from starting
     file: 'app/dist/electron/main.js',
     marker: 'gs-linux:services',
     replace: [[
@@ -49,7 +51,7 @@ module.exports = [
     ]],
   },
   {
-    name: 'main: 이동식 디스크 열거 (PowerShell/wmic → Linux)',
+    name: 'main: removable disk enumeration (PowerShell/wmic -> Linux)',
     file: 'app/dist/electron/main.js',
     marker: 'gs-linux:disks',
     replace: [[
@@ -58,7 +60,7 @@ module.exports = [
     ]],
   },
   {
-    name: 'main: JieLi 장치 식별 (ffi DLL → jlemu)',
+    name: 'main: JieLi device identification (ffi DLL -> jlemu)',
     file: 'app/dist/electron/main.js',
     marker: 'gs-linux:jlutil',
     replace: [[
@@ -67,7 +69,7 @@ module.exports = [
     ]],
   },
   {
-    name: 'main: U-disk 업그레이드 worker (→ linux/udiskUpgradeWorker.js)',
+    name: 'main: U-disk upgrade worker (-> linux/udiskUpgradeWorker.js)',
     file: 'app/dist/electron/main.js',
     marker: 'gs-linux:worker',
     replace: [[

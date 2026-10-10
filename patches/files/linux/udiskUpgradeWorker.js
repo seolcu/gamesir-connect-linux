@@ -1,7 +1,7 @@
-// dfu/udiskUpgradWoker.js 의 Linux판.
-// 같은 workerData를 받고 같은 형식의 메시지를 parentPort로 보낸다.
-// 실제 업그레이드는 jlemu.py 가 공식 DLL을 에뮬레이션해서 수행한다
-// (원본 worker와 같은 순서: UFW 로드 → 장치 PID 조회/비교 → 듀얼백업 설정 → JL_upgradeDevice).
+// Linux version of dfu/udiskUpgradWoker.js.
+// Takes the same workerData and posts messages in the same format to parentPort.
+// The actual upgrade is done by jlemu.py emulating the official DLL
+// (same order as the original worker: load UFW → query/compare device PID → set dual backup → JL_upgradeDevice).
 'use strict';
 const { parentPort, workerData } = require('worker_threads');
 const { spawn } = require('child_process');
@@ -25,7 +25,7 @@ function run() {
   const requirePidMatch = workerData.requirePidMatch !== false;
   debug('upgrade start (linux) ' + JSON.stringify({ udisk, ufwPath, requirePidMatch }));
 
-  // 듀얼 백업 대상 여부는 UFW PID로 정해진다 (원본은 장치 PID 기준이지만 PID 일치 검사 후이므로 같다)
+  // Dual backup is decided by the UFW PID (the original uses the device PID, but they are equal after the PID match check)
   const pre = helper.runJlemu(['ufwinfo', ufwPath]).events.find((e) => e.event === 'ufwinfo');
   const args = ['-I', helper.JLEMU, '--dll', helper.DLL, '--device', udisk, 'upgrade', ufwPath];
   if (!requirePidMatch) args.push('--no-pid-check');

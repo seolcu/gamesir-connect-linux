@@ -1,4 +1,4 @@
-// GameSir Connect Linux 헬퍼 (패치된 main.js에서 globalThis.__gsLinux 로 로드됨)
+// GameSir Connect Linux helper (loaded by the patched main.js as globalThis.__gsLinux)
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -15,8 +15,8 @@ function python() {
   return fs.existsSync(venv) ? venv : 'python3';
 }
 
-// JieLi UBOOT 모드로 붙은 USB 저장장치의 SCSI generic 노드(/dev/sgN)를 찾는다.
-// Windows판의 "이동식 드라이브 문자" 자리에 이 경로가 들어간다.
+// Finds the SCSI generic nodes (/dev/sgN) of USB mass storage devices in JieLi UBOOT mode.
+// These paths take the place of the "removable drive letters" used on Windows.
 function listUbootDisks() {
   const out = [];
   let sgs = [];
@@ -32,7 +32,7 @@ function listUbootDisks() {
     } catch (e) {
       continue;
     }
-    // 상위로 올라가며 USB 장치 노드(idVendor)를 찾는다
+    // Walk up to the USB device node (the one with idVendor)
     for (let d = dir; d !== '/' && d !== '.'; d = path.dirname(d)) {
       let vid;
       try {
@@ -47,7 +47,7 @@ function listUbootDisks() {
   return Promise.resolve(out);
 }
 
-// jlemu.py 를 실행하고 JSON 이벤트 줄들을 돌려준다
+// Runs jlemu.py and returns its JSON event lines
 function runJlemu(args, timeoutMs = 60000) {
   const r = spawnSync(python(), ['-I', JLEMU, '--dll', DLL, ...args], {
     encoding: 'utf8',
@@ -60,7 +60,7 @@ function runJlemu(args, timeoutMs = 60000) {
     try {
       events.push(JSON.parse(line));
     } catch (e) {
-      // 무시
+      // ignore
     }
   }
   if (r.error || r.status === null) {
@@ -71,9 +71,9 @@ function runJlemu(args, timeoutMs = 60000) {
 
 const JL_ERROR_NO_FIRMWARE = -18;
 
-// 원본 uDiskDfuUtil(uS) 객체를 Linux 구현으로 감싼다.
-// 원본은 메인 프로세스에서 ffi로 DLL을 직접 불렀다. 여기서는 jlemu.py를 동기 실행한다.
-// DLL은 마지막에 불러온 UFW(칩 KEY)를 기준으로 장치를 조회하므로, 그 경로를 기억해 함께 넘긴다.
+// Wraps the original uDiskDfuUtil (uS) object with a Linux implementation.
+// The original called the DLL directly via ffi in the main process; here jlemu.py runs synchronously.
+// The DLL queries the device using the most recently loaded UFW (chip KEY), so that path is remembered and passed along.
 function wrapJlUtil(orig) {
   let loadedUfw = null;
   return Object.assign({}, orig, {
