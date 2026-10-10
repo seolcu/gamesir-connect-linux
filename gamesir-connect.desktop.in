@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GameSir Connect
+Comment=GameSir controller configuration (Linux repack)
+Exec=@BIN@
+Icon=@PREFIX@/icon.ico
+Terminal=false
+Categories=Game;Settings;HardwareSettings;
+StartupWMClass=GameSir Connect

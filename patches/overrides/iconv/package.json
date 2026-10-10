@@ -1,0 +1,7 @@
+{
+  "name": "iconv",
+  "version": "0.0.0-linux-iconv-lite",
+  "description": "iconv-lite backed replacement for the native iconv module (Iconv#convert only)",
+  "main": "index.js",
+  "license": "MIT"
+}

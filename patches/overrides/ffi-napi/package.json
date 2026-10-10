@@ -1,0 +1,7 @@
+{
+  "name": "ffi-napi",
+  "version": "3.1.0-linux-stub",
+  "description": "Linux stub for ffi-napi: Windows-only DLL bindings are unavailable",
+  "main": "index.js",
+  "license": "MIT"
+}

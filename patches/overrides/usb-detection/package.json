@@ -1,0 +1,7 @@
+{
+  "name": "usb-detection",
+  "version": "4.14.2-linux-sysfs",
+  "description": "Linux sysfs-polling replacement for usb-detection (no native code)",
+  "main": "index.js",
+  "license": "MIT"
+}
